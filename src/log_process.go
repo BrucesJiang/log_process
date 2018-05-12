@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"net/url"
+	"github.com/influxdata/influxdb/client/v2"
 )
 
 /**
@@ -168,8 +169,62 @@ func (l *LogProcess) Process() {
 
 //写入模块
 func (w *WriteIntoInfluxDB) Write(wc chan interface{}) {
+	//for line := range wc {
+	//	fmt.Println(line)
+	//}
+
+	//解析数据库连接信息
+	infSli := strings.Split(w.influxDBDsn, "@")
+
+	//Create a new HTTPClient
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr: infSli[0], //地址
+		Username: infSli[1], //用户名
+		Password: infSli[2], //密码
+	})
+
+	if err != nil {
+		log.Fatal(fmt.Println("Database Connection fails :", err.Error()))
+	}
+
 	for line := range wc {
-		fmt.Println(line)
+		//Create a new point batch
+		bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+			Database:infSli[3],
+			Precision:infSli[4],
+
+		})
+
+		//Create a point and add to batch
+		//Tags: Path, Method, Scheme, Status
+		message, ok := line.(*Message)
+		if !ok {
+			log.Println("Type Error : ", line)
+		}
+		tags := map[string]string{"Path": message.Path, "Method": message.Method, "Scheme": message.Schema, "Status": message.Status}
+
+		//Fields: UpstreamTime, RequestTime, BytesSent
+		fields := map[string]interface{} {
+			"UpstreamTime": message.UpstreamTime,
+			"RequestTime": message.RequestTime,
+			"BytesSent": message.BytesSent,
+		}
+
+		pt, err := client.NewPoint("log_info", tags, fields, message.TimeLocal)
+
+		if err != nil {
+			log.Println("Write into Database Fails", err.Error())
+			continue
+		}
+
+		bp.AddPoint(pt)
+
+		// Write the batch
+		if err := c.Write(bp); err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("write success!")
 	}
 
 }
@@ -180,7 +235,7 @@ func main() {
 	}
 
 	w := &WriteIntoInfluxDB{
-		influxDBDsn: "bruce@bruce...",
+		influxDBDsn: "http://127.0.0.1:8086@bruce@bruce@log_process@s",
 	}
 
 	lp := &LogProcess{
