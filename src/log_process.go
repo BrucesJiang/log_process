@@ -12,6 +12,9 @@ import (
 	"strings"
 	"net/url"
 	"github.com/influxdata/influxdb/client/v2"
+	"net/http"
+	"encoding/json"
+	"flag"
 )
 
 /**
@@ -92,6 +95,7 @@ func (r *ReadFromFile) Read(rc chan interface{}) {
 			log.Panic(fmt.Sprintf("File Read Error: %s\n", err.Error()))
 		}
 
+		TypeMonitorChan <- TypeHandleLine
 		//去掉换行符
 		//注意传输数据类型的统一
 		rc <- string(line[:len(line)-1])
@@ -123,6 +127,7 @@ func (l *LogProcess) Process() {
 
 		//没一行可以解析出14子块
 		if len(ret) != 14 {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("FindStringSubmatch fail:", ret)
 			continue
 		}
@@ -130,6 +135,7 @@ func (l *LogProcess) Process() {
 		message := &Message{}
 		t, err := time.ParseInLocation("02/Jan/2006:15:04:05 +0000", ret[4], loc)
 		if err != nil {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("ParseInLocation fail:", err.Error(), ret[4])
 			continue
 		}
@@ -141,6 +147,7 @@ func (l *LogProcess) Process() {
 		//GET /foo?query=t HTTP/1.0
 		reqSli := strings.Split(ret[6], " ")
 		if len(reqSli) != 3 {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("strings.Split fail :", ret[6])
 			continue
 		}
@@ -148,6 +155,7 @@ func (l *LogProcess) Process() {
 
 		u, err := url.Parse(reqSli[1])
 		if err != nil {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("url parse fail : ", err.Error())
 			continue
 		}
@@ -229,7 +237,86 @@ func (w *WriteIntoInfluxDB) Write(wc chan interface{}) {
 
 }
 
+//系统状态指数
+type SystemInfo struct {
+	HandleLine int `json:"handleLine"` //处理日志总行数
+	Tps   float64 `json:"tps"` //系统吞吐量
+	ReadChanLen int `json:"readChanLen"` // read channel 长度
+	WriteChanLen int `json:"writeChanLen"` //write channel 长度
+	RunTime string `json:"runTime"` //运行总时间
+	ErrNum int `json:"errNum"` //错误数
+}
+
+//全局变量
+const (
+	TypeHandleLine = 0 //处理了一行， 用 0标志
+	TypeErrNum = 1 //处理失败， 1标志
+)
+
+//全局监控变量
+var TypeMonitorChan = make(chan int, 200)
+
+//监控器对象
+type Monitor struct {
+	startTime time.Time
+	data SystemInfo
+	tpsSli []int
+}
+
+
+//构建简单服务器，开启监控服务
+func (m *Monitor) start(lp *LogProcess) {
+	//使用一个协程统计处理行数和错误行数信息
+	go func() {
+		for tmc := range TypeMonitorChan {
+			switch tmc {
+			case TypeErrNum:
+				m.data.ErrNum += 1
+			case TypeHandleLine:
+				m.data.HandleLine += 1
+			}
+		}
+	}()
+
+	//创建计时器
+
+	ticker := time.NewTicker(time.Second * 5)
+	//计算吞吐量， 每 5 秒统计一次
+	go func() {
+		for {
+			<- ticker.C
+			m.tpsSli = append(m.tpsSli, m.data.HandleLine)
+			if len(m.tpsSli) > 2 {
+				m.tpsSli = m.tpsSli[1:]
+			}
+		}
+	}()
+
+	http.HandleFunc("/monitor", func(writer http.ResponseWriter, request *http.Request){
+		m.data.RunTime = time.Now().Sub(m.startTime).String()
+		m.data.ReadChanLen = len(lp.rc)
+		m.data.WriteChanLen = len(lp.wc)
+
+		if len(m.tpsSli) >= 2 {
+			m.data.Tps = float64(m.tpsSli[1] - m.tpsSli[0]) / 5
+		}
+
+		ret, _ := json.MarshalIndent(m.data, " ", "\t")
+		io.WriteString(writer, string(ret))
+	})
+	http.ListenAndServe(":9193", nil)
+}
+
+
 func main() {
+
+	var path, influxDsn string
+
+	flag.StringVar(&path, "path", "./access.log", "read file path")
+	flag.StringVar(&influxDsn, "influxDsn", "http://127.0.0.1:8086@imooc@imoocpass@imooc@s", "influx data source")
+	flag.Parse()
+
+
 	r := &ReadFromFile{
 		path: "./access.log",
 	}
@@ -239,15 +326,26 @@ func main() {
 	}
 
 	lp := &LogProcess{
-		make(chan interface{}),
-		make(chan interface{}),
+		make(chan interface{}, 200),
+		make(chan interface{}, 200),
 		r,
 		w,
 	}
 
 	go lp.reader.Read(lp.rc)
-	go lp.Process()
-	go lp.writer.Write(lp.wc)
-	time.Sleep(time.Second * 10)
-	fmt.Println("H")
+
+	for i := 0; i < 2; i ++ {
+		go lp.Process()
+	}
+
+	for i := 0; i < 4; i ++ {
+		go lp.writer.Write(lp.wc)
+	}
+
+	m := &Monitor{
+		startTime: time.Now(),
+		data : SystemInfo{},
+	}
+
+	m.start(lp)
 }
