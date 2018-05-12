@@ -1,44 +1,84 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"fmt"
 	"time"
 )
 
-type LogProcess struct {
-	rc chan []byte
-	wc chan string
-	path string //文件路径
-	influxDns string //influx data source
+/**
+ * 定义读取器接口， 便于扩展
+ */
+type Reader interface {
+	Read(rc chan interface{})
 }
 
-func (l *LogProcess)ReadFromFile() {
-	l.rc <- bytes.NewBufferString("Message").Bytes()
+/**
+ * 定义写入器接口，便于扩展
+ */
+type Writer interface {
+	Write(wc chan interface{})
+}
+
+
+/**
+ * 定义一个读取器
+ */
+type ReadFromFile struct {
+	path string //文件路径
+}
+
+
+/**
+ * 定义一个写入器
+ */
+type WriteIntoInfluxDB struct {
+	influxDBDsn string //influx data source
+}
+
+
+type LogProcess struct {
+	rc chan interface{}
+	wc chan interface{}
+	reader Reader //读取器
+	writer Writer //写入器
+}
+
+func (r *ReadFromFile)Read(rc chan interface{}) {
+	rc <- "Message"
 }
 
 func (l *LogProcess)Process() {
 	message := <- l.rc
-	l.wc <- strings.ToUpper(string(message))
+	//convert interface{} to string
+	msg := fmt.Sprintf("%v", message)
+	l.wc <- strings.ToUpper(msg)
 }
 
-func (l *LogProcess)WriteIntoInfluxDB() {
-	fmt.Println(<-l.wc)
+func (w *WriteIntoInfluxDB)Write(wc chan interface{}) {
+	fmt.Println(<-wc)
 }
 
 func main() {
-	lp := &LogProcess{
-		rc: make(chan []byte),
-		wc: make(chan string),
+	r := &ReadFromFile{
 		path: "./access.log",
-		influxDns: "bruce@bruce...",
-
 	}
 
-	go lp.ReadFromFile()
+	w := &WriteIntoInfluxDB{
+		influxDBDsn: "bruce@bruce...",
+	}
+
+
+	lp := &LogProcess{
+		make(chan interface{}),
+		make(chan interface{}),
+		r,
+		w,
+	}
+
+	go lp.reader.Read(lp.rc)
 	go lp.Process()
-	go lp.WriteIntoInfluxDB()
+	go lp.writer.Write(lp.wc)
 	time.Sleep(time.Second * 2)
 	fmt.Println("H")
 }
